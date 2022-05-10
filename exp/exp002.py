@@ -1,4 +1,4 @@
-""" exp001
+""" exp002
 
 * make baseline Ref:
     * https://www.kaggle.com/code/ammarali32/imc-2022-kornia-loftr-from-0-533-to-0-721
@@ -70,11 +70,9 @@ def scale_image(image: torch.Tensor) -> torch.Tensor:
     Args:
         image: (channels, h, w)
     """
-    # 840はpretrainedのモデルの学習に使われたサイズ
-    training_image_size = 840
-    scale = training_image_size / max(image.shape[1], image.shape[2])
-    w = int(image.shape[2] * scale)
-    h = int(image.shape[1] * scale)
+    # 元の画像スケールに合わせて、両辺が８の倍数になるように調整
+    w = int(image.shape[2] // 8 * 8)
+    h = int(image.shape[1] // 8 * 8)
     # 正規化
     image = T.functional.resize(image, size=[h, w]).float() / 255.0
     return image
@@ -91,7 +89,7 @@ def make_fundamental_matrix(
         matchered_keypoints0,
         matchered_keypoints1,
         cv2.USAC_MAGSAC,
-        0.5,
+        0.185,
         0.9999,
         100_000,
     )
@@ -104,7 +102,7 @@ def make_submission(
     fundamental_matrix_dict: dict[str, np.ndarray], submission_path: Path
 ) -> None:
     with submission_path.open("w") as f:
-        f.write("sample_id, fundamental_matrix\n")
+        f.write("sample_id,fundamental_matrix\n")
         for sample_id, fundamental_matrix in fundamental_matrix_dict.items():
             f.write(f"{sample_id},{flatten_matrix(fundamental_matrix)}\n")
 

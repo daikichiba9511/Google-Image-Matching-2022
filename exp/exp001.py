@@ -104,7 +104,7 @@ def make_submission(
     fundamental_matrix_dict: dict[str, np.ndarray], submission_path: Path
 ) -> None:
     with submission_path.open("w") as f:
-        f.write("sample_id, fundamental_matrix\n")
+        f.write("sample_id,fundamental_matrix\n")
         for sample_id, fundamental_matrix in fundamental_matrix_dict.items():
             f.write(f"{sample_id},{flatten_matrix(fundamental_matrix)}\n")
 
