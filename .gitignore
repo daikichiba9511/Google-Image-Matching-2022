@@ -1,2 +1,5 @@
 input
 output
+
+.ipynb_checkpoints
+*.ipynb

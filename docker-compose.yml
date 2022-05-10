@@ -5,6 +5,8 @@ services:
       context: .
       dockerfile: ./Dockerfile
     shm_size: 60g
+    ports:
+      - '8888:8888'
     image: im2022-kaggle
     container_name: container-im2022-kaggle
     tty: true
