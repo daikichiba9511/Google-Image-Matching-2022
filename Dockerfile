@@ -19,8 +19,9 @@ RUN apt-get update && apt-get upgrade -y \
     make \
     git \
     python3.7 \
+    python3.7-dev \
+    python3-psutil \
     python3-pip \
-    python3-distutils \
     python3-apt \
     software-properties-common \
     libgl1-mesa-dev
@@ -29,6 +30,8 @@ RUN add-apt-repository ppa:deadsnakes/ppa \
     && apt update && apt install -y python3.7 \
     && apt install -y python3.7-distutils \
     && update-alternatives --install /usr/bin/python python /usr/bin/python3.7 1
+
+RUN python -m pip install psutil --upgrade --user
     
 COPY ./ ./
 

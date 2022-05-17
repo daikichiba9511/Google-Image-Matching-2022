@@ -7,7 +7,8 @@ PACAKGES = \
 	seaborn \
 	tqdm \
 	kornia[x] \
-	kornia_moons
+	kornia_moons \
+	opencv-python
 	
 
 TORCH = torch torchvision --extra-index-url https://download.pytorch.org/whl/cu113
