@@ -503,6 +503,11 @@ def validate(
         print(f"Scene {scene} ({len(errors_dict_q[scene])} pairs), mAA = {cur_maa:.05f}")
     print(f"mAA = {maa}")
 
+    results_path = save_valid_df_path.parent / "results-maa-per-scene.csv"
+    with results_path.open("w") as f:
+        f.write("scene,maa\n")
+        for scene, maa in maa_per_scene.items():
+            f.write(f"{scene},{float(maa):.8f}\n")
 
 def infer(
     matcher: KF.LoFTR, test_samples: list[list[str]], test_image_dir: Path, device: torch.device = torch.device("cuda")

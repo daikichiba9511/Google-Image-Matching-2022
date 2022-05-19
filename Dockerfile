@@ -28,7 +28,7 @@ RUN apt-get update && apt-get upgrade -y \
 
 RUN add-apt-repository ppa:deadsnakes/ppa \
     && apt update && apt install -y python3.7 \
-    && apt install -y python3.7-distutils \
+    && apt install -y python3.7-distutils python3.7-venv \
     && update-alternatives --install /usr/bin/python python /usr/bin/python3.7 1
 
 RUN python -m pip install psutil --upgrade --user

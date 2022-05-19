@@ -1,7 +1,5 @@
 """ exp004
 
-* make validation pipeline
-
 Ref:
     * https://www.kaggle.com/code/ammarali32/imc-2022-kornia-loftr-from-0-533-to-0-721
 """
@@ -14,10 +12,9 @@ import pdb
 import random
 import sys
 from pathlib import Path
-from typing import Any, NamedTuple
+from typing import NamedTuple
 
 import cv2
-import kornia
 import kornia as K
 import kornia.feature as KF
 import matplotlib.pyplot as plt
@@ -26,11 +23,14 @@ import pandas as pd
 import torch
 import torchvision.transforms as T
 from kornia_moons.feature import draw_LAF_matches
+from torch.utils.data import DataLoader, Dataset
 from torchvision.io import ImageReadMode, read_image
 from tqdm.auto import tqdm
 
 IS_NOTEBOOK = "ipykernel" in sys.modules
-random.seed(42)
+SEED: int = 42
+random.seed(SEED)
+np.random.seed(SEED)
 
 
 def load_matcher(ckpt_path: Path, device: torch.device) -> KF.LoFTR:
@@ -118,30 +118,41 @@ def scale_image(image: torch.Tensor) -> torch.Tensor:
 
 
 def make_fundamental_matrix(
-    matchered_keypoints0: np.ndarray, matchered_keypoints1: np.ndarray
+    matchered_keypoints0: np.ndarray,
+    matchered_keypoints1: np.ndarray,
+    ransac_reproj_threshold: float = 0.185,
+    confidence: float = 0.9999,
+    max_iters: int = 100_000,
 ) -> np.ndarray:
+    """compute fundamental matrix by opencv
+
+    Args:
+        image0: an image
+        image1: an image
+        ransac_reproj_threshold: threshold to determine inlier
+        max_iters: the number of iteration
+    """
     assert isinstance(matchered_keypoints0, np.ndarray) and isinstance(matchered_keypoints1, np.ndarray)
     # use eight-algorithm
     if len(matchered_keypoints0) < 8:
         return np.zeros((3, 3))
 
-    fundamental_matrix, inliers = cv2.findFundamentalMat(
-        matchered_keypoints0,
-        matchered_keypoints1,
-        cv2.USAC_MAGSAC,
-        0.185,
-        0.9999,
-        100_000,
+    fundamental_matrix, _ = cv2.findFundamentalMat(
+        points1=matchered_keypoints0,
+        points2=matchered_keypoints1,
+        method=cv2.USAC_MAGSAC,
+        # method=cv2.USAC_ACCURATE,
+        ransacReprojThreshold=ransac_reproj_threshold,
+        confidence=confidence,
+        maxIters=max_iters,
     )
     # inliers = inliers > 0
     assert fundamental_matrix.shape == (3, 3), f"Invalid Shape => {fundamental_matrix.shape}"
     return fundamental_matrix
 
 
-def make_submission(
-    fundamental_matrix_dict: dict[str, np.ndarray], submission_path: Path
-) -> None:
-    assert submission_path.exists(), f"submission_path => {submission_path}"
+def make_submission(fundamental_matrix_dict: dict[str, np.ndarray], submission_path: Path) -> None:
+    assert submission_path.parent.exists(), f"submission_path => {submission_path}"
     with submission_path.open("w") as f:
         f.write("sample_id,fundamental_matrix\n")
         for sample_id, fundamental_matrix in fundamental_matrix_dict.items():
@@ -153,7 +164,7 @@ def plot_LAFs(
     matchered_keypoints1: np.ndarray,
     inliers: np.ndarray,
     image0: torch.Tensor,
-    image1: torch.Tensor
+    image1: torch.Tensor,
 ) -> None:
     draw_LAF_matches(
         KF.laf_from_center_scale_ori(
@@ -197,28 +208,17 @@ def get_image(image_data_root: Path, scene: str, image_id: str) -> torch.Tensor:
     image = scale_image(image)
     image = cast_image_bgr_to_rgb(image)
     image = K.color.rgb_to_grayscale(image)
-
-    if len(image.shape) == 3:
-        image = image.unsqueeze(0)
-
-    # shape: (Batch Size, 1, H, W)
-    assert len(image.shape) == 4, f"image.shape => {image.shape}"
-    assert image.shape[1] == 1, f"Not Gray Scale: image.shape => {image.shape}"
     return image
 
 
 def compute_match(
     matcher: KF.LoFTR,
-    image_data_root: Path,
-    scene: str,
-    image_0_id: str,
-    image_1_id: str,
-    device: torch.device = torch.device("cuda")
+    image_0: torch.Tensor,
+    image_1: torch.Tensor,
 ) -> tuple[np.ndarray, np.ndarray]:
-    image_0 = get_image(image_data_root, scene, image_0_id)
-    image_1 = get_image(image_data_root, scene, image_1_id)
-    image_0 = image_0.to(device)
-    image_1 = image_1.to(device)
+    assert (
+        len(image_0.shape) == len(image_1.shape) == 4
+    ), f"image_0.shape => {image_0.shape}, image_1.shape => {image_1.shape}"
 
     with torch.inference_mode():
         correspondences = matcher({"image0": image_0, "image1": image_1})
@@ -229,8 +229,11 @@ def compute_match(
 
 
 def parse_fundamental_matrix(fundamental_matrices_str: list[str], sample_ids: list[str]) -> dict[str, np.ndarray]:
+    assert isinstance(fundamental_matrices_str, list) and isinstance(
+        fundamental_matrices_str[0], str
+    ), f"fundamental_matrices_str[0] => {fundamental_matrices_str[0]}"
     predictions = {}
-    for i, (sample_id, fundamental_matrix_str) in enumerate(zip(sample_ids, fundamental_matrices_str)):
+    for sample_id, fundamental_matrix_str in zip(sample_ids, fundamental_matrices_str):
         predictions[sample_id] = np.array([float(v) for v in fundamental_matrix_str.split(" ")]).reshape(3, 3)
     return predictions
 
@@ -272,17 +275,21 @@ def decompose_fundamental_matrix_with_intrinsics(
         T:
     """
     # This fundamentally reimplements this function:
-    #   * https://github.com/opencv/opencv/blob/be38d4ea932bc3a0d06845ed1a2de84acc2a09de/modules/calib3d/src/five-point.cpp#L742
+    # https://github.com/opencv/opencv/blob/be38d4ea932bc3a0d06845ed1a2de84acc2a09de/modules/calib3d/src/five-point.cpp#L742
     # This is a pre-requisite of OpenCV's recoverPose:
-    #   * https://github.com/opencv/opencv/blob/be38d4ea932bc3a0d06845ed1a2de84acc2a09de/modules/calib3d/src/five-point.cpp#L559
-    # Instead of the cheirality check with correspondences, we keep and evaluate the different hypotheses downstream, and pick the best one.
-    # Note that our metric does not care about the sign of the translation vector, so we only need to evaluate the two rotation matrices.
+    # https://github.com/opencv/opencv/blob/be38d4ea932bc3a0d06845ed1a2de84acc2a09de/modules/calib3d/src/five-point.cpp#L559
+    # Instead of the cheirality check with correspondences,
+    # we keep and evaluate the different hypotheses downstream, and pick the best one.
+    # Note that our metric does not care about the sign of the translation vector,
+    # so we only need to evaluate the two rotation matrices.
     assert fundamental_matrix.shape == (3, 3), f"Invalid shape => {fundamental_matrix.shape}"
     assert fundamental_matrix.shape[1] == K0.shape[0]
 
     E = np.matmul(K1.T, np.matmul(fundamental_matrix, K0))
 
-    u, s, vh = np.linalg.svd(E,)
+    u, s, vh = np.linalg.svd(
+        E,
+    )
     if np.linalg.det(u) < 0:
         u *= -1
     if np.linalg.det(vh) < 0:
@@ -296,9 +303,7 @@ def decompose_fundamental_matrix_with_intrinsics(
 
 
 def quaternion_from_matrix(matrix: np.ndarray) -> np.ndarray:
-    """四元数: 回転を表す
-
-    """
+    """四元数: 回転を表す"""
 
     M = np.asarray(matrix, dtype=np.float64)[:4, :4]
     m00 = M[0, 0]
@@ -339,14 +344,14 @@ def compute_error_for_one_example(
 
     The function returns two errors, over rotation and translation.
     These are combined at different thresholds by 'compute_maa' in order to compute the mean Average Accuracy.
-    
+
     Args:
         q_gt: ground truth of quaternion
         T_gt  ground truth of translation
         q: quaternion, that represents rotation
         T: translation
         scale:
-        eps: 
+        eps:
 
     Returns:
         error_q * 180 / np.pi:
@@ -373,27 +378,26 @@ def compute_maa(
 ) -> tuple[np.floating, np.ndarray, np.ndarray, np.ndarray]:
     assert len(error_q) == len(error_t)
 
-    error_q = np.asarray(error_q)
-    error_t = np.asarray(error_t)
+    error_q_np = np.asarray(error_q)
+    error_t_np = np.asarray(error_t)
 
     acc: list[np.floating] = []
     acc_q: list[np.floating] = []
     acc_t: list[np.floating] = []
     for th_q, th_t in zip(thresholds_q, thresholds_t):
-        acc += [(np.bitwise_and(error_q < th_q, error_t < th_t)).sum() / len(error_q)]
-        acc_q += [(error_q < th_q).sum() / len(error_q)]
-        acc_t += [(error_t < th_t).sum() / len(error_t)]
+        acc += [(np.bitwise_and(error_q_np < th_q, error_t_np < th_t)).sum() / len(error_q_np)]
+        acc_q += [(error_q_np < th_q).sum() / len(error_q_np)]
+        acc_t += [(error_t_np < th_t).sum() / len(error_t_np)]
     return np.mean(acc), np.asarray(acc), np.asarray(acc_q), np.asarray(acc_t)
 
 
-# TODO
 def compute_validation_maa(
     predict_df: pd.DataFrame,
     scaling_dict: dict[str, float],
     threshold_q: np.ndarray,
     threshold_t: np.ndarray,
     image_data_root: Path,
-    eps: float = 1e-15
+    eps: float = 1e-15,
 ) -> tuple[np.floating, dict[str, np.floating], dict[str, dict[str, np.floating]], dict[str, dict[str, np.floating]]]:
     assert "sample_id" in predict_df.columns and "fundamental_matrix" in predict_df.columns
 
@@ -404,9 +408,12 @@ def compute_validation_maa(
 
     scenes: list[str] = []
     for prediciton in predictions.keys():
-        dataset, scene, pair = prediciton.split(";")
-        if scene not in scenes:
-            scenes += [scene]
+        _, scene, _ = prediciton.split(";")
+        if scene in scenes:
+            continue
+        if "/images" in scene:
+            scene = scene.split("/")[0]
+        scenes += [scene]
 
     calibration_dict: dict[str, dict[str, Gt]] = {
         scene: load_calibration(image_data_root / scene / "calibration.csv") for scene in scenes
@@ -415,7 +422,9 @@ def compute_validation_maa(
     errors_dict_q: dict[str, dict[str, np.floating]] = {scene: {} for scene in scenes}
     errors_dict_t: dict[str, dict[str, np.floating]] = {scene: {} for scene in scenes}
     for sample_id, predicted_fundamental_matrix in tqdm(predictions.items(), total=len(predictions)):
-        dataset, scene, pair = sample_id.split(";")
+        _, scene, pair = sample_id.split(";")
+        if "/images" in scene:
+            scene = scene.split("/")[0]
         image_id_0, image_id_1 = pair.split("-")
 
         gt_0 = calibration_dict[scene][image_id_0]
@@ -441,7 +450,7 @@ def compute_validation_maa(
             q_gt=q_gt, T_gt=dT_gt, q=q_pred_b, T=T_pred, scale=scaling_dict[scene]
         )
         assert error_t_a == error_t_b
-        errors_dict_q[scene][pair] = min(error_q_a, error_q_b)
+        errors_dict_q[scene][pair] = np.minimum(error_q_a, error_q_b)
         errors_dict_t[scene][pair] = error_t_a
 
     maa_per_scene: dict[str, np.floating] = {}
@@ -450,9 +459,45 @@ def compute_validation_maa(
             error_q=list(errors_dict_q[scene].values()),
             error_t=list(errors_dict_t[scene].values()),
             thresholds_q=threshold_q,
-            thresholds_t=threshold_t
+            thresholds_t=threshold_t,
         )
     return np.mean(list(maa_per_scene.values())), maa_per_scene, errors_dict_q, errors_dict_t
+
+
+class ImcDataset(Dataset):
+    def __init__(
+        self, samples: list[str] | list[list[str]], image_dir_path: Path, is_test: bool, scene: str | None = None
+    ) -> None:
+        super().__init__()
+        # testのときはlist[list[str]]
+        self._samples = samples
+        self._is_test = is_test
+        self._image_dir_path = image_dir_path
+        self._scene = scene if scene is not None else "Null"
+        if scene is not None and not is_test:
+            assert not is_test and "/images" in self._scene, f"scene => {scene}"
+        else:
+            assert is_test and scene is None
+
+    def __len__(self) -> int:
+        return len(self._samples)
+
+    def __getitem__(self, index: int) -> tuple[torch.Tensor, torch.Tensor, str]:
+        if self._is_test:
+            row = self._samples[index]
+            sample_id, scene, image_0_id, image_1_id = row
+        # train & valid
+        else:
+            scene = self._scene
+            pair = self._samples[index]
+            if not isinstance(pair, str):
+                raise TypeError(f"pair => {pair}, type => {type(pair)}")
+            sample_id = f"phototourism;{scene};{pair}"
+            image_0_id, image_1_id = pair.split("-")
+
+        image0 = get_image(self._image_dir_path, scene, image_0_id)
+        image1 = get_image(self._image_dir_path, scene, image_1_id)
+        return image0, image1, sample_id
 
 
 def validate(
@@ -460,8 +505,19 @@ def validate(
     scaling_dict: dict[str, float],
     data_root: Path,
     save_valid_df_path: Path,
-    max_num_pairs: int = 1000
+    max_num_pairs: int = 1000,
+    batch_size: int = 1,
+    device: torch.device = torch.device("cuda"),
 ) -> None:
+    """compute mean Average Accuracy
+
+    Args:
+        matcher: kornia.feature.LoFTR
+        scaling_dict: scale factor of dict loaded by load_scaling_factors
+        save_valid_df_path: save path of predictions of dataframe
+        max_num_pairs: the number of validation data
+
+    """
     train_data_root = data_root / "train"
 
     sample_ids = []
@@ -471,18 +527,22 @@ def validate(
         covisibility_dict, fundamental_matrix_gt = read_covisibility_data(covisibility_csv_path)
 
         pairs = extract_pairs(covisibility_dict, threshold=0.1, max_num_pairs=max_num_pairs)
+        dataset = ImcDataset(pairs, train_data_root, is_test=False, scene=scene + "/images")
+        dataloader = DataLoader(
+            dataset, shuffle=False, drop_last=False, pin_memory=True, num_workers=4, batch_size=batch_size
+        )
 
-        for pair in tqdm(pairs, total=len(pairs)):
-            image_0_id, image_1_id = pair.split("-")
+        for batch in tqdm(dataloader, total=len(dataloader)):
+            image_0, image_1, sample_id = batch
+            image_0, image_1 = image_0.to(device, non_blocking=True), image_1.to(device, non_blocking=True)
+
             matchered_keypoints0, matchered_keypoints1 = compute_match(
-                matcher=matcher,
-                image_data_root=train_data_root,
-                scene=scene + "/images",
-                image_0_id=image_0_id,
-                image_1_id=image_1_id
+                matcher=matcher, image_0=image_0, image_1=image_1
             )
             fundamental_matrix = make_fundamental_matrix(matchered_keypoints0, matchered_keypoints1)
-            sample_ids.append(f"phototourism;{scene};{pair}")
+            if len(sample_id) != 1:
+                raise ValueError
+            sample_ids.append(sample_id[0])
             fundamental_matrices.append(flatten_matrix(fundamental_matrix))
 
     valid_df = pd.DataFrame({"sample_id": sample_ids, "fundamental_matrix": fundamental_matrices})
@@ -491,37 +551,64 @@ def validate(
     threshold_q = np.linspace(1, 10, 10)
     threshold_t = np.geomspace(0.2, 5, 10)
 
-    maa, maa_per_scene, errors_dict_q, errors_dict_t = compute_validation_maa(
+    maa, maa_per_scene, errors_dict_q, _ = compute_validation_maa(
         predict_df=valid_df,
         scaling_dict=scaling_dict,
         threshold_q=threshold_q,
         threshold_t=threshold_t,
-        image_data_root=train_data_root
+        image_data_root=train_data_root,
     )
 
     for scene, cur_maa in maa_per_scene.items():
         print(f"Scene {scene} ({len(errors_dict_q[scene])} pairs), mAA = {cur_maa:.05f}")
     print(f"mAA = {maa}")
 
+    results_path = save_valid_df_path.parent / "results-maa-per-scene.csv"
+    with results_path.open("w") as f:
+        f.write("scene,maa\n")
+        for scene, maa in maa_per_scene.items():
+            f.write(f"{scene},{float(maa):.8f}\n")
+
 
 def infer(
-    matcher: KF.LoFTR, test_samples: list[list[str]], test_image_dir: Path, device: torch.device = torch.device("cuda")
+    matcher: KF.LoFTR,
+    test_samples: list[list[str]],
+    test_image_dir: Path,
+    batch_size: int = 1,
+    device: torch.device = torch.device("cuda"),
 ) -> dict[str, np.ndarray]:
+    """
+    Args:
+        matcher: instance of kornia.feature.LoFTR
+        test_samples: test samples by load_test_samples
+        test_image_dir: Path instance of test image dir
+
+    Return:
+        fundamental_matrix_dict: {sample_id: fundamental_matrix}
+
+    """
     fundamental_matrix_dict = {}
-    pbar = tqdm(enumerate(test_samples), total=len(test_samples))
-    for i, row in pbar:
-        sample_id, batch_id, image_0_id, image_1_id = row
-        matchered_keypoints0, matchered_keypoints1 = compute_match(
-            matcher, test_image_dir, batch_id, image_0_id, image_1_id
-        )
+    dataset = ImcDataset(test_samples, test_image_dir, is_test=True)
+    dataloader = DataLoader(
+        dataset, shuffle=False, drop_last=False, pin_memory=True, num_workers=4, batch_size=batch_size
+    )
+    pbar = tqdm(dataloader, total=len(dataloader))
+    for batch in pbar:
+        image_0, image_1, sample_id = batch
+        if isinstance(sample_id, list) and len(sample_id) == 1:
+            sample_id = sample_id[0]
+        image_0, image_1 = image_0.to(device, non_blocking=True), image_1.to(device, non_blocking=True)
+        matchered_keypoints0, matchered_keypoints1 = compute_match(matcher=matcher, image_0=image_0, image_1=image_1)
         fundamental_matrix_dict[sample_id] = make_fundamental_matrix(matchered_keypoints0, matchered_keypoints1)
 
     return fundamental_matrix_dict
 
 
 def main() -> None:
-    exp_name = "exp001"
+    exp_name = "exp004"
     is_valid = not IS_NOTEBOOK
+    max_num_pairs = 1000
+    # max_num_pairs = 5
 
     input_path = Path("../input") if IS_NOTEBOOK else Path("./input")
     data_root = input_path / "image-matching-challenge-2022"
@@ -541,7 +628,11 @@ def main() -> None:
         scaling_dict = load_scaling_factors(data_root / "train" / "scaling_factors.csv")
         save_valid_df_path = output_dir / "valid_df.csv"
         validate(
-            matcher=matcher, scaling_dict=scaling_dict, data_root=data_root, save_valid_df_path=save_valid_df_path
+            matcher=matcher,
+            scaling_dict=scaling_dict,
+            data_root=data_root,
+            save_valid_df_path=save_valid_df_path,
+            max_num_pairs=max_num_pairs,
         )
 
     fundamental_matrix_dict = infer(matcher=matcher, test_samples=test_samples, test_image_dir=test_image_dir)
