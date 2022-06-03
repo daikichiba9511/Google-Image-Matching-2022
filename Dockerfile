@@ -1,4 +1,4 @@
-FROM nvidia/cuda:11.0-base-ubuntu20.04
+FROM nvidia/cuda:11.3.0-devel-ubuntu20.04
 
 ENV LC_ALL="C.UTF-8" LESSCHARSET="utf-8"
 
@@ -18,8 +18,6 @@ RUN apt-get update && apt-get upgrade -y \
     python-is-python3 \
     make \
     git \
-    python3.7 \
-    python3.7-dev \
     python3-psutil \
     python3-pip \
     python3-apt \
@@ -28,7 +26,7 @@ RUN apt-get update && apt-get upgrade -y \
 
 RUN add-apt-repository ppa:deadsnakes/ppa \
     && apt update && apt install -y python3.7 \
-    && apt install -y python3.7-distutils python3.7-venv \
+    && apt install -y python3.7-distutils python3.7-venv python3.7-dev \
     && update-alternatives --install /usr/bin/python python /usr/bin/python3.7 1
 
 RUN python -m pip install psutil --upgrade --user

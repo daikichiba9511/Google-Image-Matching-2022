@@ -21,12 +21,16 @@ DEV_DEPENDENCIES = \
 	jupyterlab \
 	jedi-language-server 
 
+DETECTRON2 = python -m pip install 'git+https://github.com/facebookresearch/detectron2.git'
 
 install_packages:
 	python -m pip install --upgrade pip \
-	&& pip install ${TORCH} \
-	&& pip install ${DEV_DEPENDENCIES} \
-	&& pip install ${PACAKGES}
+	&& python -m pip install --upgrade ${TORCH} \
+	&& python -m pip install --upgrade ${DEV_DEPENDENCIES} \
+	&& python -m pip install --upgrade ${PACAKGES}
+
+install_detectron2:
+	${DETECTRON2}
 
 setup: ## setup package on kaggle docker image
 	python --version \
