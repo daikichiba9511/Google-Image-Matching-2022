@@ -3,3 +3,6 @@ output
 
 .ipynb_checkpoints
 *.ipynb
+
+.vscode
+.devcontainer

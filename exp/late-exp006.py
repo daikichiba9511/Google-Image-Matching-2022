@@ -6,17 +6,16 @@ Ref:
     * https://www.kaggle.com/code/ammarali32/imc-2022-kornia-loftr-from-0-533-to-0-721
 """
 from __future__ import annotations
-
 import csv
 import gc
 import os
 import pdb
-import pprint
 import random
 import sys
 from pathlib import Path
 from typing import NamedTuple
 
+import pprint
 import cv2
 import kornia as K
 import kornia.feature as KF
@@ -30,7 +29,7 @@ from kornia_moons.feature import draw_LAF_matches
 from torch.utils.data import DataLoader, Dataset
 from torchvision.io import ImageReadMode, read_image
 from torchvision.models.detection.faster_rcnn import FastRCNNPredictor
-from torchvision.models.detection.mask_rcnn import MaskRCNN, MaskRCNNPredictor
+from torchvision.models.detection.mask_rcnn import MaskRCNNPredictor, MaskRCNN
 from tqdm.auto import tqdm
 
 # from detectron2.config import get_cfg, LazyConfig, instantiate
@@ -659,7 +658,7 @@ def validate(
             output1 = maskrcnn([image_1[0]])
 
             # pdb.set_trace()
-            bboxes0: torch.Tensor = output0[0]["boxes"]
+            bboxes0 = output0[0]["boxes"]
             bboxes1 = output1[0]["boxes"]
 
             # for detectron2
@@ -669,11 +668,11 @@ def validate(
             # segment
             mask0 = output0[0]["masks"]
             mask1 = output1[0]["masks"]
-            # image_0 = apply_people_mask(image_0[0], mask0).unsqueeze(0).cuda()
-            # image_1 = apply_people_mask(image_1[0], mask1).unsqueeze(0).cuda()
+            image_0 = apply_people_mask(image_0[0], mask0).unsqueeze(0).cuda()
+            image_1 = apply_people_mask(image_1[0], mask1).unsqueeze(0).cuda()
 
-            image_0 = apply_people_bboxes(image_0[0], bboxes0).unsqueeze(0)
-            image_1 = apply_people_bboxes(image_1[0], bboxes1).unsqueeze(0)
+            # image_0 = apply_people_bboxes(image_0[0], bboxes0).unsqueeze(0)
+            # image_1 = apply_people_bboxes(image_1[0], bboxes1).unsqueeze(0)
 
             if batch_index < 30:
                 image_name = sample_id[0].replace("/", "")
@@ -724,6 +723,7 @@ def validate(
 
 def infer(
     matcher: KF.LoFTR,
+    maskrcnn: MaskRCNN,
     test_samples: list[list[str]],
     test_image_dir: Path,
     batch_size: int = 1,
@@ -758,6 +758,16 @@ def infer(
         image_0 = K.color.rgb_to_grayscale(image_0)
         image_1 = K.color.rgb_to_grayscale(image_1)
         image_0, image_1 = image_0.to(device, non_blocking=True), image_1.to(device, non_blocking=True)
+
+
+        output0 = maskrcnn([image_0[0]])
+        output1 = maskrcnn([image_1[0]])
+
+        mask0 = output0[0]["masks"]
+        mask1 = output1[0]["masks"]
+        image_0 = apply_people_mask(image_0[0], mask0).unsqueeze(0).cuda()
+        image_1 = apply_people_mask(image_1[0], mask1).unsqueeze(0).cuda()
+
         matchered_keypoints0, matchered_keypoints1 = compute_match(matcher=matcher, image_0=image_0, image_1=image_1)
         fundamental_matrix_dict[sample_id] = make_fundamental_matrix(matchered_keypoints0, matchered_keypoints1)
 
@@ -765,7 +775,7 @@ def infer(
 
 
 def main() -> None:
-    exp_name = "exp005"
+    exp_name = "late-exp006"
     is_valid = not IS_NOTEBOOK
     # max_num_pairs = 1000
     max_num_pairs = 5
@@ -803,7 +813,7 @@ def main() -> None:
             max_num_pairs=max_num_pairs,
         )
 
-    fundamental_matrix_dict = infer(matcher=matcher, test_samples=test_samples, test_image_dir=test_image_dir)
+    fundamental_matrix_dict = infer(matcher=matcher, maskrcnn=maskrcnn, test_samples=test_samples, test_image_dir=test_image_dir)
     make_submission(fundamental_matrix_dict, submission_path)
 
 
